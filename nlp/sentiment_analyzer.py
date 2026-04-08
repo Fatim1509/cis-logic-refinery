@@ -10,224 +10,182 @@ import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Tuple
-import numpy as np
-
-# VADER sentiment analysis
-try:
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    VADER_AVAILABLE = True
-except ImportError:
-    VADER_AVAILABLE = False
-    logging.warning("VADER not available, using fallback")
-
-# Financial BERT
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 class SentimentAnalyzer:
-    """Multi-model sentiment analyzer for financial text"""
+    """Multi-model sentiment analyzer using VADER and finBERT"""
     
-    def __init__(self, use_vader=True, use_finbert=True):
-        self.use_vader = use_vader and VADER_AVAILABLE
-        self.use_finbert = use_finbert
+    def __init__(self):
+        self.vader = SentimentIntensityAnalyzer()
+        self.finbert_model = None
+        self.finbert_tokenizer = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize VADER
-        if self.use_vader:
-            self.vader_analyzer = SentimentIntensityAnalyzer()
-            logger.info("✅ VADER analyzer initialized")
-        
-        # Initialize finBERT
-        if self.use_finbert:
-            try:
-                self.finbert_pipeline = pipeline(
-                    "sentiment-analysis",
-                    model="ProsusAI/finbert",
-                    tokenizer="ProsusAI/finbert",
-                    max_length=512,
-                    truncation=True
-                )
-                logger.info("✅ FinBERT pipeline initialized")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize FinBERT: {e}")
-                self.use_finbert = False
+        logger.info(f"🧠 Initializing sentiment analyzer on {self.device}")
+        self._load_finbert()
     
-    def analyze_vader(self, text: str) -> Dict[str, float]:
+    def _load_finbert(self):
+        """Load finBERT model for financial sentiment analysis"""
+        try:
+            model_name = "yiyanghkust/finbert-tone"
+            self.finbert_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.finbert_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            self.finbert_model.to(self.device)
+            self.finbert_model.eval()
+            logger.info("✅ finBERT model loaded successfully")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load finBERT model: {e}")
+            self.finbert_model = None
+    
+    def analyze_vader(self, text: str) -> Dict:
         """Analyze sentiment using VADER"""
-        if not self.use_vader:
-            return {'compound': 0.0, 'pos': 0.0, 'neu': 0.0, 'neg': 0.0}
+        scores = self.vader.polarity_scores(text)
         
-        try:
-            scores = self.vader_analyzer.polarity_scores(text)
-            return scores
-        except Exception as e:
-            logger.error(f"VADER analysis failed: {e}")
-            return {'compound': 0.0, 'pos': 0.0, 'neu': 0.0, 'neg': 0.0}
-    
-    def analyze_finbert(self, text: str) -> Dict[str, float]:
-        """Analyze sentiment using FinBERT"""
-        if not self.use_finbert:
-            return {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
-        
-        try:
-            # Truncate text if too long
-            if len(text) > 500:
-                text = text[:500] + "..."
-            
-            result = self.finbert_pipeline(text)[0]
-            label = result['label'].lower()
-            score = result['score']
-            
-            # Convert to probabilities
-            if label == 'positive':
-                return {'positive': score, 'negative': (1-score)/2, 'neutral': (1-score)/2}
-            elif label == 'negative':
-                return {'positive': (1-score)/2, 'negative': score, 'neutral': (1-score)/2}
-            else:  # neutral
-                return {'positive': (1-score)/2, 'negative': (1-score)/2, 'neutral': score}
-                
-        except Exception as e:
-            logger.error(f"FinBERT analysis failed: {e}")
-            return {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
-    
-    def combine_sentiments(self, vader_scores: Dict, finbert_scores: Dict) -> Dict[str, float]:
-        """Combine VADER and FinBERT scores"""
-        
-        # Normalize VADER compound score to 0-1 range
-        vader_normalized = (vader_scores['compound'] + 1) / 2
-        
-        # Extract FinBERT probabilities
-        finbert_positive = finbert_scores.get('positive', 0.33)
-        finbert_negative = finbert_scores.get('negative', 0.33)
-        finbert_neutral = finbert_scores.get('neutral', 0.34)
-        
-        # Weighted combination (60% VADER, 40% FinBERT for financial domain)
-        combined_positive = (vader_normalized * 0.6) + (finbert_positive * 0.4)
-        combined_negative = ((1 - vader_normalized) * 0.6) + (finbert_negative * 0.4)
-        combined_neutral = finbert_neutral * 0.4  # FinBERT neutral only
-        
-        # Normalize to ensure they sum to 1
-        total = combined_positive + combined_negative + combined_neutral
-        if total > 0:
-            combined_positive /= total
-            combined_negative /= total
-            combined_neutral /= total
+        # Classify based on compound score
+        if scores['compound'] >= 0.05:
+            sentiment = 'positive'
+        elif scores['compound'] <= -0.05:
+            sentiment = 'negative'
+        else:
+            sentiment = 'neutral'
         
         return {
-            'positive': combined_positive,
-            'negative': combined_negative,
-            'neutral': combined_neutral,
-            'confidence': max(combined_positive, combined_negative, combined_neutral)
+            'sentiment': sentiment,
+            'confidence': abs(scores['compound']),
+            'scores': scores,
+            'model': 'vader'
         }
     
-    def classify_sentiment(self, combined_scores: Dict) -> str:
-        """Classify overall sentiment"""
-        positive = combined_scores['positive']
-        negative = combined_scores['negative']
-        neutral = combined_scores['neutral']
+    def analyze_finbert(self, text: str) -> Dict:
+        """Analyze sentiment using finBERT"""
+        if self.finbert_model is None:
+            return {'error': 'finBERT model not available'}
         
-        # Determine dominant sentiment
-        if positive > negative and positive > neutral:
-            return 'positive'
-        elif negative > positive and negative > neutral:
-            return 'negative'
-        else:
-            return 'neutral'
-    
-    def analyze_text(self, text: str) -> Dict:
-        """Analyze text sentiment using all available models"""
-        
-        if not text or len(text.strip()) == 0:
+        try:
+            # Tokenize input
+            inputs = self.finbert_tokenizer(
+                text, 
+                return_tensors="pt", 
+                max_length=512, 
+                truncation=True, 
+                padding=True
+            ).to(self.device)
+            
+            # Get model predictions
+            with torch.no_grad():
+                outputs = self.finbert_model(**inputs)
+                predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            
+            # Convert to probabilities
+            probs = predictions[0].cpu().numpy()
+            
+            # Map to sentiment labels
+            labels = ['negative', 'neutral', 'positive']
+            sentiment_idx = np.argmax(probs)
+            sentiment = labels[sentiment_idx]
+            confidence = float(probs[sentiment_idx])
+            
             return {
-                'text': text,
-                'sentiment': 'neutral',
-                'confidence': 0.5,
-                'vader_scores': self.analyze_vader(text),
-                'finbert_scores': self.analyze_finbert(text),
-                'combined_scores': {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34, 'confidence': 0.5}
+                'sentiment': sentiment,
+                'confidence': confidence,
+                'scores': {label: float(prob) for label, prob in zip(labels, probs)},
+                'model': 'finbert'
             }
+            
+        except Exception as e:
+            logger.error(f"finBERT analysis failed: {e}")
+            return {'error': f'finBERT analysis failed: {e}'}
+    
+    def analyze_text(self, text: str, use_both: bool = True) -> Dict:
+        """Analyze text using both VADER and finBERT"""
+        if not text or len(text.strip()) < 10:
+            return {'error': 'Text too short for analysis'}
         
-        # Analyze with VADER
-        vader_scores = self.analyze_vader(text)
+        results = {}
         
-        # Analyze with FinBERT
-        finbert_scores = self.analyze_finbert(text)
+        # VADER analysis
+        vader_result = self.analyze_vader(text)
+        results['vader'] = vader_result
         
-        # Combine scores
-        combined_scores = self.combine_sentiments(vader_scores, finbert_scores)
+        # finBERT analysis
+        if self.finbert_model:
+            finbert_result = self.analyze_finbert(text)
+            results['finbert'] = finbert_result
         
-        # Classify overall sentiment
-        sentiment_label = self.classify_sentiment(combined_scores)
+        # Consensus analysis if both models available
+        if use_both and 'finbert' in results and 'error' not in results['finbert']:
+            consensus = self._calculate_consensus(results['vader'], results['finbert'])
+            results['consensus'] = consensus
         
-        result = {
-            'text': text[:200] + "..." if len(text) > 200 else text,  # Truncate for storage
-            'sentiment': sentiment_label,
-            'confidence': combined_scores['confidence'],
-            'vader_scores': vader_scores,
-            'finbert_scores': finbert_scores,
-            'combined_scores': combined_scores,
-            'analyzed_at': datetime.utcnow().isoformat()
+        results['text_length'] = len(text)
+        results['analyzed_at'] = datetime.utcnow().isoformat()
+        
+        return results
+    
+    def _calculate_consensus(self, vader_result: Dict, finbert_result: Dict) -> Dict:
+        """Calculate consensus between VADER and finBERT"""
+        vader_sentiment = vader_result['sentiment']
+        finbert_sentiment = finbert_result['sentiment']
+        
+        # Simple consensus logic
+        if vader_sentiment == finbert_sentiment:
+            consensus_sentiment = vader_sentiment
+            confidence = (vader_result['confidence'] + finbert_result['confidence']) / 2
+        else:
+            # Weight finBERT higher for financial text
+            consensus_sentiment = finbert_sentiment
+            confidence = finbert_result['confidence'] * 0.7 + vader_result['confidence'] * 0.3
+        
+        return {
+            'sentiment': consensus_sentiment,
+            'confidence': confidence,
+            'agreement': vader_sentiment == finbert_sentiment,
+            'method': 'weighted_consensus'
         }
-        
-        return result
     
     def analyze_batch(self, texts: List[str]) -> List[Dict]:
         """Analyze multiple texts"""
         results = []
-        for text in texts:
+        for i, text in enumerate(texts):
+            logger.info(f"Analyzing text {i+1}/{len(texts)}")
             result = self.analyze_text(text)
             results.append(result)
         return results
     
-    def get_sentiment_summary(self, results: List[Dict]) -> Dict:
-        """Get summary statistics for batch analysis"""
-        if not results:
-            return {'total': 0, 'positive': 0, 'negative': 0, 'neutral': 0, 'avg_confidence': 0}
-        
-        total = len(results)
-        positive = sum(1 for r in results if r['sentiment'] == 'positive')
-        negative = sum(1 for r in results if r['sentiment'] == 'negative')
-        neutral = sum(1 for r in results if r['sentiment'] == 'neutral')
-        avg_confidence = sum(r['confidence'] for r in results) / total
-        
+    def get_model_info(self) -> Dict:
+        """Get information about loaded models"""
         return {
-            'total': total,
-            'positive': positive,
-            'negative': negative,
-            'neutral': neutral,
-            'positive_pct': (positive / total) * 100,
-            'negative_pct': (negative / total) * 100,
-            'neutral_pct': (neutral / total) * 100,
-            'avg_confidence': avg_confidence
+            'vader_available': True,
+            'finbert_available': self.finbert_model is not None,
+            'device': str(self.device),
+            'models_loaded_at': datetime.utcnow().isoformat()
         }
 
 # Example usage
-def main():
+if __name__ == "__main__":
     analyzer = SentimentAnalyzer()
     
     # Test texts
-    texts = [
-        "The stock market is crashing! Sell everything now!",
-        "Great earnings report, company beating expectations.",
-        "Market remains flat with no significant movement.",
-        "Bitcoin surges to new all-time highs amid institutional adoption."
+    test_texts = [
+        "Apple reported strong earnings beating expectations with revenue up 15%",
+        "Tesla stock crashes after disappointing delivery numbers",
+        "Microsoft announces new AI initiatives with mixed market reaction"
     ]
     
-    # Analyze batch
-    results = analyzer.analyze_batch(texts)
-    
-    # Print results
-    for i, result in enumerate(results):
-        print(f"\nText {i+1}: {result['text']}")
-        print(f"Sentiment: {result['sentiment']} (confidence: {result['confidence']:.3f})")
-        print(f"VADER compound: {result['vader_scores']['compound']:.3f}")
-        print(f"FinBERT: +{result['finbert_scores']['positive']:.3f} -{result['finbert_scores']['negative']:.3f}")
-    
-    # Summary
-    summary = analyzer.get_sentiment_summary(results)
-    print(f"\n📊 Summary: {summary['positive']} positive, {summary['negative']} negative, {summary['neutral']} neutral")
-    print(f"Average confidence: {summary['avg_confidence']:.3f}")
-
-if __name__ == "__main__":
-    main()
+    for text in test_texts:
+        print(f"\n📝 Text: {text[:60]}...")
+        results = analyzer.analyze_text(text)
+        
+        if 'consensus' in results:
+            consensus = results['consensus']
+            print(f"🎯 Consensus: {consensus['sentiment']} (confidence: {consensus['confidence']:.3f})")
+        
+        print(f"📊 VADER: {results['vader']['sentiment']} ({results['vader']['confidence']:.3f})")
+        
+        if 'finbert' in results and 'error' not in results['finbert']:
+            print(f"🧠 finBERT: {results['finbert']['sentiment']} ({results['finbert']['confidence']:.3f})")

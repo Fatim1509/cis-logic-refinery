@@ -8,163 +8,174 @@ Handles cross-repository communication using GitHub repository_dispatch API.
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
-
 import requests
 from github import Github
 
 logger = logging.getLogger(__name__)
 
 class RepositoryDispatcher:
-    """Handles repository dispatch communication between CIS repos"""
+    """Handles dispatch events between repositories"""
     
     def __init__(self, token: str):
         self.token = token
         self.github = Github(token)
         
-    def create_dispatch_payload(self, data: Dict, max_size_kb: int = 65) -> Dict:
-        """Create dispatch payload within GitHub size limits"""
-        
-        # Convert data to JSON string
-        payload_str = json.dumps(data, default=str)
-        payload_size_kb = len(payload_str.encode('utf-8')) / 1024
-        
-        logger.info(f"📦 Original payload size: {payload_size_kb:.2f}KB")
-        
-        if payload_size_kb > max_size_kb:
-            logger.warning(f"⚠️ Payload too large ({payload_size_kb:.2f}KB), truncating...")
-            
-            # Truncate strategy: keep only essential fields
-            truncated_data = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'version': '1.0',
-                'summary': {
-                    'total_signals': len(data.get('consensus', {}).get('source_breakdown', {})),
-                    'recommendation': data.get('consensus', {}).get('recommendation', 'NEUTRAL'),
-                    'confidence': data.get('consensus', {}).get('confidence', 0),
-                    'dominant_sentiment': data.get('consensus', {}).get('dominant_sentiment', 'neutral')
-                },
-                'data_url': f"https://raw.githubusercontent.com/{self.github.get_user().login}/cis-operational-center/main/data/master_intel.json"
-            }
-            
-            payload_str = json.dumps(truncated_data, default=str)
-            final_size_kb = len(payload_str.encode('utf-8')) / 1024
-            
-            logger.info(f"📦 Truncated payload size: {final_size_kb:.2f}KB")
-            return truncated_data
-        
-        return data
+        logger.info("🔔 Repository dispatcher initialized")
     
-    def send_dispatch(self, owner: str, repo: str, event_type: str = "cis-intelligence-update", 
-                       client_payload: Optional[Dict] = None) -> bool:
-        """Send repository dispatch to target repository"""
+    def create_dispatch_event(
+        self, 
+        target_owner: str, 
+        target_repo: str, 
+        event_type: str = "cis-intelligence-update",
+        client_payload: Optional[Dict] = None,
+        payload_file: Optional[str] = None
+    ) -> bool:
+        """Create a repository dispatch event"""
         
         try:
-            # Get target repository
-            target_repo = self.github.get_repo(f"{owner}/{repo}")
+            # Load payload from file if provided
+            if payload_file:
+                with open(payload_file, 'r') as f:
+                    payload_data = json.load(f)
+                
+                # Truncate if too large (65KB limit)
+                payload_str = json.dumps(payload_data)
+                if len(payload_str.encode('utf-8')) > 65000:
+                    logger.warning("Payload too large, truncating...")
+                    # Keep only essential fields
+                    truncated_data = {
+                        'summary': payload_data.get('summary', ''),
+                        'signals': payload_data.get('signals', [])[:10],  # Limit to 10 signals
+                        'timestamp': payload_data.get('timestamp', datetime.utcnow().isoformat()),
+                        'source': 'cis-logic-refinery'
+                    }
+                    client_payload = truncated_data
+                else:
+                    client_payload = payload_data
             
-            # Prepare payload
-            if client_payload is None:
+            # Ensure payload has required structure
+            if not client_payload:
                 client_payload = {
-                    'timestamp': datetime.utcnow().isoformat(),
                     'message': 'CIS intelligence update',
-                    'version': '1.0'
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'source': 'cis-logic-refinery'
                 }
             
-            # Ensure payload is within size limits
-            payload = self.create_dispatch_payload(client_payload)
+            # Add metadata
+            client_payload['dispatch_time'] = datetime.utcnow().isoformat()
+            client_payload['sender'] = 'cis-logic-refinery'
+            client_payload['version'] = '1.0.0'
             
-            logger.info(f"🚀 Sending dispatch to {owner}/{repo}")
-            logger.info(f"   Event type: {event_type}")
-            logger.info(f"   Payload size: {len(json.dumps(payload).encode('utf-8'))} bytes")
+            logger.info(f"📤 Creating dispatch event for {target_owner}/{target_repo}")
+            logger.info(f"Event type: {event_type}")
+            logger.info(f"Payload size: {len(json.dumps(client_payload).encode('utf-8'))} bytes")
             
-            # Send dispatch
-            target_repo.create_repository_dispatch(event_type, payload)
+            # Use GitHub API directly for better control
+            url = f"https://api.github.com/repos/{target_owner}/{target_repo}/dispatches"
+            headers = {
+                'Authorization': f'token {self.token}',
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
+            }
             
-            logger.info(f"✅ Dispatch sent successfully to {owner}/{repo}")
-            return True
+            data = {
+                'event_type': event_type,
+                'client_payload': client_payload
+            }
             
-        except Exception as e:
-            logger.error(f"❌ Failed to send dispatch to {owner}/{repo}: {e}")
-            return False
-    
-    def send_file_dispatch(self, owner: str, repo: str, payload_file: str, 
-                          event_type: str = "cis-intelligence-update") -> bool:
-        """Send dispatch with payload loaded from file"""
-        
-        try:
-            # Load payload from file
-            file_path = Path(payload_file)
-            if not file_path.exists():
-                logger.error(f"❌ Payload file not found: {payload_file}")
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 204:
+                logger.info("✅ Dispatch event created successfully")
+                return True
+            else:
+                logger.error(f"❌ Failed to create dispatch event: {response.status_code} - {response.text}")
                 return False
-            
-            with open(file_path, 'r') as f:
-                payload_data = json.load(f)
-            
-            logger.info(f"📄 Loaded payload from {payload_file}")
-            return self.send_dispatch(owner, repo, event_type, payload_data)
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in payload file: {e}")
-            return False
+                
         except Exception as e:
-            logger.error(f"❌ Failed to load payload file: {e}")
+            logger.error(f"❌ Error creating dispatch event: {e}")
             return False
     
-    def test_dispatch(self, owner: str, repo: str) -> bool:
-        """Send test dispatch to verify connectivity"""
-        
-        test_payload = {
-            'test': True,
-            'timestamp': datetime.utcnow().isoformat(),
-            'message': 'CIS test dispatch - connectivity verification'
-        }
-        
-        logger.info(f"🧪 Sending test dispatch to {owner}/{repo}")
-        return self.send_dispatch(owner, repo, "cis-test", test_payload)
+    def wait_for_completion(self, target_owner: str, target_repo: str, timeout: int = 300) -> bool:
+        """Wait for the dispatched workflow to complete"""
+        try:
+            repo = self.github.get_repo(f"{target_owner}/{target_repo}")
+            
+            logger.info(f"⏳ Waiting for workflow completion (timeout: {timeout}s)")
+            
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                # Check recent workflow runs
+                runs = repo.get_workflow_runs()
+                
+                for run in runs[:5]:  # Check last 5 runs
+                    if run.created_at.timestamp() > start_time:
+                        status = run.status
+                        conclusion = run.conclusion
+                        
+                        logger.info(f"Workflow run {run.id}: {status} - {conclusion}")
+                        
+                        if status == 'completed':
+                            if conclusion == 'success':
+                                logger.info("✅ Target workflow completed successfully")
+                                return True
+                            else:
+                                logger.error(f"❌ Target workflow failed: {conclusion}")
+                                return False
+                
+                time.sleep(10)  # Check every 10 seconds
+            
+            logger.warning("⏰ Timeout waiting for workflow completion")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error waiting for completion: {e}")
+            return False
 
 def main():
+    """Main function for CLI usage"""
     import argparse
     
     parser = argparse.ArgumentParser(description='CIS Repository Dispatcher')
     parser.add_argument('--target-owner', required=True, help='Target repository owner')
     parser.add_argument('--target-repo', required=True, help='Target repository name')
     parser.add_argument('--token', required=True, help='GitHub personal access token')
-    parser.add_argument('--payload-file', help='Path to payload JSON file')
     parser.add_argument('--event-type', default='cis-intelligence-update', help='Event type')
-    parser.add_argument('--test', action='store_true', help='Send test dispatch')
+    parser.add_argument('--payload-file', help='JSON file containing client payload')
+    parser.add_argument('--wait', action='store_true', help='Wait for workflow completion')
+    parser.add_argument('--timeout', type=int, default=300, help='Timeout in seconds')
     
     args = parser.parse_args()
     
-    # Initialize dispatcher
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Create dispatcher
     dispatcher = RepositoryDispatcher(args.token)
     
-    if args.test:
-        # Send test dispatch
-        success = dispatcher.test_dispatch(args.target_owner, args.target_repo)
-        sys.exit(0 if success else 1)
+    # Create dispatch event
+    success = dispatcher.create_dispatch_event(
+        target_owner=args.target_owner,
+        target_repo=args.target_repo,
+        event_type=args.event_type,
+        payload_file=args.payload_file
+    )
     
-    elif args.payload_file:
-        # Send dispatch with file payload
-        success = dispatcher.send_file_dispatch(
-            args.target_owner,
-            args.target_repo,
-            args.payload_file,
-            args.event_type
+    if success and args.wait:
+        dispatcher.wait_for_completion(
+            target_owner=args.target_owner,
+            target_repo=args.target_repo,
+            timeout=args.timeout
         )
-        sys.exit(0 if success else 1)
     
-    else:
-        # Send basic dispatch
-        success = dispatcher.send_dispatch(
-            args.target_owner,
-            args.target_repo,
-            args.event_type
-        )
-        sys.exit(0 if success else 1)
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

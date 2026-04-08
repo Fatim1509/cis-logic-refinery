@@ -2,315 +2,279 @@
 """
 CIS Consensus Verification Engine
 
-Implements weighted consensus algorithm and deduplication for multi-source validation.
+Implements weighted consensus verification using cosine similarity and performance tracking.
 """
 
 import json
 import logging
-import os
+import numpy as np
 from datetime import datetime
 from typing import Dict, List, Tuple
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import re
 
 logger = logging.getLogger(__name__)
 
 class ConsensusEngine:
-    """Multi-source consensus verification with weighted performance algorithm"""
+    """Consensus verification engine for multi-source intelligence"""
     
-    def __init__(self, config_path="config/weights.json"):
-        self.config_path = config_path
-        self.weights = self.load_weights()
-        self.similarity_threshold = 0.85  # Cosine similarity threshold for deduplication
-        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
-        
-        # Historical performance tracking
-        self.performance_history = self.load_performance_history()
-        
-    def load_weights(self) -> Dict[str, float]:
-        """Load source weights configuration"""
-        default_weights = {
+    def __init__(self, threshold: float = 0.85):
+        self.threshold = threshold
+        self.encoder = None
+        self.source_weights = {
             'reuters': 0.25,
-            'investing': 0.20,
+            'investing.com': 0.20,
             'tradingeconomics': 0.20,
             'finviz': 0.20,
             'twitter': 0.15
         }
+        self.performance_history = {}
         
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r') as f:
-                    weights = json.load(f)
-                logger.info(f"✅ Loaded weights from {self.config_path}")
-                return weights
-        except Exception as e:
-            logger.warning(f"⚠️ Could not load weights, using defaults: {e}")
-        
-        return default_weights
+        logger.info(f"⚖️ Initializing consensus engine with threshold {threshold}")
+        self._load_encoder()
     
-    def load_performance_history(self) -> Dict[str, List[float]]:
-        """Load historical performance data"""
-        history_file = "data/performance_history.json"
-        
+    def _load_encoder(self):
+        """Load sentence transformer for embeddings"""
         try:
-            if os.path.exists(history_file):
-                with open(history_file, 'r') as f:
-                    history = json.load(f)
-                logger.info(f"✅ Loaded performance history from {history_file}")
-                return history
+            self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("✅ Sentence encoder loaded successfully")
         except Exception as e:
-            logger.warning(f"⚠️ Could not load performance history: {e}")
-        
-        # Return empty history for each source
-        return {source: [] for source in self.weights.keys()}
+            logger.warning(f"⚠️ Could not load sentence encoder: {e}")
+            self.encoder = None
     
-    def calculate_cosine_similarity(self, text1: str, text2: str) -> float:
+    def normalize_text(self, text: str) -> str:
+        """Normalize text for comparison"""
+        if not text:
+            return ""
+        
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Remove special characters and extra whitespace
+        text = re.sub(r'[^\w\s]', ' ', text)
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove common financial stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'among', 'within', 'without', 'under', 'over', 'behind', 'beside', 'beneath', 'beyond', 'across', 'around', 'near', 'far', 'inside', 'outside', 'against', 'toward', 'towards', 'upon', 'off', 'down', 'out', 'away', 'back', 'forward', 'ahead', 'aside', 'apart', 'together', 'alone', 'here', 'there', 'everywhere', 'anywhere', 'somewhere', 'nowhere', 'when', 'where', 'why', 'how', 'what', 'which', 'who', 'whom', 'whose', 'if', 'unless', 'until', 'while', 'since', 'as', 'because', 'although', 'though', 'however', 'therefore', 'thus', 'hence', 'moreover', 'furthermore', 'nevertheless', 'nonetheless', 'meanwhile', 'otherwise', 'instead', 'besides', 'also', 'too', 'either', 'neither', 'both', 'all', 'any', 'some', 'many', 'much', 'few', 'little', 'more', 'most', 'less', 'least', 'very', 'quite', 'rather', 'pretty', 'fairly', 'really', 'truly', 'certainly', 'definitely', 'probably', 'possibly', 'maybe', 'perhaps', 'surely', 'clearly', 'obviously', 'apparently', 'seemingly', 'supposedly', 'allegedly', 'reportedly', 'presumably', 'presumedly', 'assumedly', 'supposedly', 'reportedly', 'allegedly', 'apparently', 'seemingly', 'presumably', 'presumedly', 'assumedly'}
+        
+        words = text.split()
+        words = [word for word in words if word not in stop_words]
+        
+        return ' '.join(words)
+    
+    def calculate_similarity(self, text1: str, text2: str) -> float:
         """Calculate cosine similarity between two texts"""
+        if not self.encoder:
+            # Fallback: simple word overlap
+            words1 = set(self.normalize_text(text1).split())
+            words2 = set(self.normalize_text(text2).split())
+            
+            if not words1 or not words2:
+                return 0.0
+            
+            intersection = words1.intersection(words2)
+            union = words1.union(words2)
+            
+            return len(intersection) / len(union) if union else 0.0
+        
+        # Use sentence transformer
         try:
-            # Vectorize texts
-            tfidf_matrix = self.vectorizer.fit_transform([text1, text2])
-            
-            # Calculate cosine similarity
-            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-            
+            embeddings = self.encoder.encode([text1, text2])
+            similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
             return float(similarity)
         except Exception as e:
-            logger.error(f"Error calculating similarity: {e}")
+            logger.error(f"Similarity calculation failed: {e}")
             return 0.0
     
-    def deduplicate_articles(self, articles: List[Dict]) -> List[Dict]:
-        """Remove duplicate articles based on title similarity"""
-        if not articles:
+    def group_similar_items(self, items: List[Dict], text_field: str = 'title') -> List[List[int]]:
+        """Group similar items together"""
+        if not items:
             return []
         
-        logger.info(f"🔍 Deduplicating {len(articles)} articles...")
+        n = len(items)
+        groups = []
+        used = [False] * n
         
-        unique_articles = []
-        seen_titles = []
-        
-        for article in articles:
-            title = article.get('title', '')
-            if not title:
+        for i in range(n):
+            if used[i]:
                 continue
             
-            # Check similarity with existing titles
-            is_duplicate = False
-            for seen_title in seen_titles:
-                similarity = self.calculate_cosine_similarity(title, seen_title)
-                if similarity > self.similarity_threshold:
-                    is_duplicate = True
-                    logger.debug(f"🔄 Duplicate detected (similarity: {similarity:.3f}): {title[:50]}...")
-                    break
+            current_group = [i]
+            current_text = items[i].get(text_field, '')
             
-            if not is_duplicate:
-                unique_articles.append(article)
-                seen_titles.append(title)
+            for j in range(i + 1, n):
+                if used[j]:
+                    continue
+                
+                compare_text = items[j].get(text_field, '')
+                similarity = self.calculate_similarity(current_text, compare_text)
+                
+                if similarity >= self.threshold:
+                    current_group.append(j)
+                    used[j] = True
+            
+            groups.append(current_group)
+            used[i] = True
         
-        removed_count = len(articles) - len(unique_articles)
-        logger.info(f"✅ Removed {removed_count} duplicates, {len(unique_articles)} unique articles remaining")
-        
-        return unique_articles
+        return groups
     
-    def calculate_weighted_consensus(self, articles: List[Dict]) -> Dict:
-        """Calculate weighted consensus score based on source reliability"""
-        if not articles:
-            return {'consensus_score': 0.0, 'recommendation': 'NEUTRAL', 'confidence': 0.0}
+    def calculate_source_score(self, source: str, historical_performance: Dict = None) -> float:
+        """Calculate weighted score for a data source"""
+        base_weight = self.source_weights.get(source, 0.1)
         
-        # Group articles by sentiment
-        sentiment_groups = {
-            'positive': [],
-            'negative': [],
-            'neutral': []
+        if historical_performance and source in historical_performance:
+            # Adjust weight based on historical accuracy
+            accuracy = historical_performance[source].get('accuracy', 0.5)
+            recent_accuracy = historical_performance[source].get('recent_accuracy', accuracy)
+            
+            # Weight recent performance more heavily
+            adjusted_weight = base_weight * (0.6 * recent_accuracy + 0.4 * accuracy)
+            return min(adjusted_weight, base_weight * 1.5)  # Cap at 1.5x base
+        
+        return base_weight
+    
+    def verify_consensus(self, items: List[Dict]) -> Dict:
+        """Verify consensus across multiple sources"""
+        if not items:
+            return {'consensus': 'insufficient_data', 'confidence': 0.0}
+        
+        # Group similar items
+        similar_groups = self.group_similar_items(items)
+        
+        # Analyze each group
+        verified_items = []
+        total_confidence = 0.0
+        
+        for group_idx, group in enumerate(similar_groups):
+            if not group:
+                continue
+            
+            group_items = [items[i] for i in group]
+            
+            # Calculate group consensus
+            group_result = self._analyze_group_consensus(group_items)
+            verified_items.append(group_result)
+            total_confidence += group_result['confidence']
+        
+        # Overall consensus
+        overall_confidence = total_confidence / len(similar_groups) if similar_groups else 0.0
+        
+        # Determine overall sentiment
+        sentiments = [item.get('sentiment', 'neutral') for item in verified_items]
+        sentiment_counts = {
+            'positive': sentiments.count('positive'),
+            'negative': sentiments.count('negative'),
+            'neutral': sentiments.count('neutral')
         }
         
-        for article in articles:
-            sentiment = article.get('sentiment', 'neutral')
-            source = article.get('source', 'unknown')
-            confidence = article.get('confidence', 0.5)
-            
-            # Apply source weight
-            weight = self.weights.get(source, 0.1)
-            weighted_confidence = confidence * weight
-            
-            article_data = {
-                'article': article,
-                'weight': weight,
-                'weighted_confidence': weighted_confidence
-            }
-            
-            if sentiment in sentiment_groups:
-                sentiment_groups[sentiment].append(article_data)
-        
-        # Calculate weighted scores for each sentiment
-        scores = {}
-        for sentiment, group in sentiment_groups.items():
-            if group:
-                # Sum of weighted confidences
-                total_score = sum(item['weighted_confidence'] for item in group)
-                # Normalize by number of articles and total possible weight
-                normalized_score = total_score / len(group) if group else 0
-                scores[sentiment] = normalized_score
-            else:
-                scores[sentiment] = 0.0
-        
-        # Determine dominant sentiment
-        dominant_sentiment = max(scores, key=scores.get)
-        consensus_score = scores[dominant_sentiment]
-        
-        # Calculate overall confidence
-        total_articles = len(articles)
-        avg_confidence = sum(article.get('confidence', 0.5) for article in articles) / total_articles if total_articles > 0 else 0
-        
-        # Consensus confidence considers both score magnitude and number of sources
-        confidence = min(consensus_score * avg_confidence * (1 + total_articles * 0.1), 1.0)
-        
-        # Generate recommendation
-        if consensus_score > 0.7 and confidence > 0.6:
-            recommendation = 'STRONG_BUY' if dominant_sentiment == 'positive' else 'STRONG_SELL'
-        elif consensus_score > 0.5 and confidence > 0.4:
-            recommendation = 'BUY' if dominant_sentiment == 'positive' else 'SELL'
-        else:
-            recommendation = 'NEUTRAL'
+        # Majority sentiment
+        majority_sentiment = max(sentiment_counts, key=sentiment_counts.get)
         
         return {
-            'consensus_score': consensus_score,
-            'dominant_sentiment': dominant_sentiment,
-            'recommendation': recommendation,
-            'confidence': confidence,
-            'source_breakdown': {
-                'positive_count': len(sentiment_groups['positive']),
-                'negative_count': len(sentiment_groups['negative']),
-                'neutral_count': len(sentiment_groups['neutral']),
-                'positive_score': scores['positive'],
-                'negative_score': scores['negative'],
-                'neutral_score': scores['neutral']
-            }
+            'consensus': 'verified' if overall_confidence > 0.6 else 'weak',
+            'confidence': overall_confidence,
+            'sentiment': majority_sentiment,
+            'verified_items': verified_items,
+            'total_sources': len(items),
+            'verified_groups': len(similar_groups),
+            'timestamp': datetime.utcnow().isoformat()
         }
     
-    def update_performance_history(self, source: str, accuracy: float):
-        """Update historical performance for adaptive weighting"""
-        if source not in self.performance_history:
-            self.performance_history[source] = []
+    def _analyze_group_consensus(self, group_items: List[Dict]) -> Dict:
+        """Analyze consensus within a group of similar items"""
+        if not group_items:
+            return {'consensus': 'empty', 'confidence': 0.0}
         
-        self.performance_history[source].append(accuracy)
+        # Calculate weighted scores
+        total_score = 0.0
+        total_weight = 0.0
+        sentiments = []
         
-        # Keep only last 100 entries
-        if len(self.performance_history[source]) > 100:
-            self.performance_history[source] = self.performance_history[source][-100:]
-    
-    def calculate_adaptive_weights(self) -> Dict[str, float]:
-        """Calculate weights based on historical performance"""
-        adaptive_weights = {}
+        for item in group_items:
+            source = item.get('source', 'unknown')
+            confidence = item.get('confidence', 0.5)
+            sentiment = item.get('sentiment', 'neutral')
+            
+            # Get source weight
+            source_weight = self.calculate_source_score(source)
+            
+            # Calculate weighted confidence
+            weighted_confidence = confidence * source_weight
+            
+            total_score += weighted_confidence
+            total_weight += source_weight
+            sentiments.append(sentiment)
         
-        for source, accuracies in self.performance_history.items():
-            if accuracies:
-                # Calculate average accuracy
-                avg_accuracy = np.mean(accuracies[-20:])  # Last 20 entries
-                adaptive_weights[source] = avg_accuracy
-            else:
-                # Use default weight if no history
-                adaptive_weights[source] = self.weights.get(source, 0.1)
+        # Average confidence
+        avg_confidence = total_score / total_weight if total_weight > 0 else 0.0
         
-        # Normalize weights to sum to 1.0
-        total_weight = sum(adaptive_weights.values())
-        if total_weight > 0:
-            for source in adaptive_weights:
-                adaptive_weights[source] = adaptive_weights[source] / total_weight
-        
-        return adaptive_weights
-    
-    def verify_consensus(self, raw_data: Dict) -> Dict:
-        """Main consensus verification method"""
-        logger.info("⚖️ Starting consensus verification...")
-        
-        # Collect all articles from all sources
-        all_articles = []
-        
-        for source, data in raw_data.items():
-            if isinstance(data, dict) and 'data' in data:
-                articles = data['data']
-                if isinstance(articles, list):
-                    for article in articles:
-                        article['source'] = source
-                        all_articles.append(article)
-        
-        logger.info(f"📊 Processing {len(all_articles)} articles from {len(raw_data)} sources")
-        
-        # Deduplicate articles
-        unique_articles = self.deduplicate_articles(all_articles)
-        
-        # Calculate weighted consensus
-        consensus_result = self.calculate_weighted_consensus(unique_articles)
-        
-        # Add verification metadata
-        verification_result = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'input_articles': len(all_articles),
-            'unique_articles': len(unique_articles),
-            'sources_analyzed': list(raw_data.keys()),
-            'consensus': consensus_result,
-            'weights_used': self.weights,
-            'similarity_threshold': self.similarity_threshold
+        # Majority sentiment
+        sentiment_counts = {
+            'positive': sentiments.count('positive'),
+            'negative': sentiments.count('negative'),
+            'neutral': sentiments.count('neutral')
         }
+        majority_sentiment = max(sentiment_counts, key=sentiment_counts.get)
         
-        logger.info(f"✅ Consensus verification completed")
-        logger.info(f"   Recommendation: {consensus_result['recommendation']}")
-        logger.info(f"   Confidence: {consensus_result['confidence']:.3f}")
-        logger.info(f"   Dominant sentiment: {consensus_result['dominant_sentiment']}")
+        return {
+            'consensus': 'strong' if avg_confidence > 0.7 else 'weak',
+            'confidence': avg_confidence,
+            'sentiment': majority_sentiment,
+            'items_count': len(group_items),
+            'sources': list(set(item.get('source', 'unknown') for item in group_items))
+        }
+    
+    def process_intelligence_batch(self, raw_data: Dict) -> Dict:
+        """Process a batch of intelligence data"""
+        logger.info(f"Processing intelligence batch with {len(raw_data)} sources")
+        
+        all_items = []
+        
+        # Flatten all items from different sources
+        for source, source_data in raw_data.items():
+            if isinstance(source_data, dict) and 'data' in source_data:
+                items = source_data['data']
+                if isinstance(items, list):
+                    for item in items:
+                        item['source'] = source
+                        all_items.append(item)
+        
+        if not all_items:
+            logger.warning("No items found in intelligence batch")
+            return {'error': 'no_items_found'}
+        
+        # Verify consensus
+        verification_result = self.verify_consensus(all_items)
+        
+        # Add processing metadata
+        verification_result['processed_at'] = datetime.utcnow().isoformat()
+        verification_result['total_items'] = len(all_items)
+        
+        logger.info(f"✅ Processed {len(all_items)} items, verified {verification_result['verified_groups']} groups")
         
         return verification_result
-    
-    def save_verification_result(self, result: Dict, filename: str = None):
-        """Save verification result to file"""
-        if filename is None:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/consensus_verification_{timestamp}.json"
-        
-        try:
-            with open(filename, 'w') as f:
-                json.dump(result, f, indent=2, default=str)
-            logger.info(f"💾 Verification result saved to {filename}")
-        except Exception as e:
-            logger.error(f"❌ Failed to save verification result: {e}")
 
 # Example usage
-def main():
-    # Mock data for testing
-    mock_data = {
+if __name__ == "__main__":
+    engine = ConsensusEngine(threshold=0.85)
+    
+    # Example test data
+    test_data = {
         'reuters': {
             'data': [
-                {'title': 'Stock market rises on positive earnings', 'sentiment': 'positive', 'confidence': 0.8},
-                {'title': 'Tech stocks surge ahead', 'sentiment': 'positive', 'confidence': 0.7}
-            ]
-        },
-        'investing': {
-            'data': [
-                {'title': 'Market outlook remains bullish', 'sentiment': 'positive', 'confidence': 0.75},
-                {'title': 'Investors optimistic about growth', 'sentiment': 'positive', 'confidence': 0.65}
+                {'title': 'Apple stock rises on strong earnings', 'sentiment': 'positive', 'confidence': 0.8},
+                {'title': 'Tech sector shows growth', 'sentiment': 'positive', 'confidence': 0.7}
             ]
         },
         'finviz': {
             'data': [
-                {'title': 'Bullish sentiment dominates market', 'sentiment': 'positive', 'confidence': 0.9},
-                {'title': 'Stocks continue upward trend', 'sentiment': 'positive', 'confidence': 0.8}
+                {'title': 'AAPL bullish momentum detected', 'sentiment': 'positive', 'confidence': 0.75},
+                {'title': 'Technology stocks trending up', 'sentiment': 'positive', 'confidence': 0.65}
             ]
         }
     }
     
-    # Initialize consensus engine
-    engine = ConsensusEngine()
-    
-    # Verify consensus
-    result = engine.verify_consensus(mock_data)
-    
-    # Print results
-    print(f"Recommendation: {result['consensus']['recommendation']}")
-    print(f"Confidence: {result['consensus']['confidence']:.3f}")
-    print(f"Dominant sentiment: {result['consensus']['dominant_sentiment']}")
-    
-    # Save result
-    engine.save_verification_result(result)
-
-if __name__ == "__main__":
-    main()
+    result = engine.process_intelligence_batch(test_data)
+    print(f"Consensus: {result['consensus']} (confidence: {result['confidence']:.3f})")
+    print(f"Sentiment: {result['sentiment']}")

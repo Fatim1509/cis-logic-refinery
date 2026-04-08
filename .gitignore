@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Environment
+.env
+.venv
+venv/
+
+# Logs
+*.log
+logs/
+
+# Data files
+*.json
+!config/*.json
+!data/master_intel.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GitHub
+.github/
+
+# Temporary files
+*.tmp
+*.temp
+*.backup
