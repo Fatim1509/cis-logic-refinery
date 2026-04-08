@@ -1,0 +1,29 @@
+# CIS Logic Repository Configuration
+
+# GitHub Repository Dispatch Settings
+REPO_B_OWNER: ""
+REPO_B_NAME: ""
+REPO_B_TOKEN: ""
+
+# Scraping Configuration
+STEALTH_MODE: true
+DELAY_RANGE: "2-7"
+ROTATE_UA: true
+MAX_RETRIES: 3
+
+# NLP Configuration
+VADER_ENABLED: true
+FINBERT_ENABLED: true
+CONSENSUS_THRESHOLD: 0.85
+
+# Logging
+LOG_LEVEL: "INFO"
+LOG_RETENTION_DAYS: 7
+
+# Performance
+BATCH_SIZE: 50
+MAX_ARTICLES_PER_SOURCE: 20
+
+# Security
+MAX_PAYLOAD_SIZE_KB: 65
+RATE_LIMIT_DELAY: 1
